@@ -17,6 +17,13 @@ const MAX_FRAME = 256 * 1024;                        // أقصى حجم إطار
 const MAX_MSGS_PER_SEC = 200;                        // حماية من الإغراق
 
 const clients = new Map();                           // id -> {ws, ph, name}
+const lastSeen = new Map();                          // ph -> {id, name, ts}  (في الذاكرة فقط)
+const MAX_SEEN = 50000;
+function touchSeen(c) {
+  if (!c.ph) return;
+  if (lastSeen.size > MAX_SEEN && !lastSeen.has(c.ph)) lastSeen.delete(lastSeen.keys().next().value);
+  lastSeen.set(c.ph, { id: c.id, name: c.name, ts: Date.now() });
+}
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
@@ -58,6 +65,7 @@ wss.on('connection', (ws) => {
       if (old && old.ws !== ws) old.ws.close();      // جلسة جديدة تستبدل القديمة
       me = { id: m.id, ph: String(m.ph || ''), name: String(m.name || '').slice(0, 40), ws };
       clients.set(me.id, me);
+      touchSeen(me);
       clearTimeout(authTimer);
       sendJson(ws, { t: 'hello_ok' });
       return;
@@ -67,10 +75,17 @@ wss.on('connection', (ws) => {
     if (m.t === 'presence' && Array.isArray(m.hashes)) {
       const wanted = new Set(m.hashes.slice(0, 5000).map(String));
       const online = [];
+      const onlinePh = new Set();
       for (const c of clients.values()) {
-        if (c.id !== me.id && wanted.has(c.ph)) online.push({ id: c.id, ph: c.ph, name: c.name });
+        if (c.id !== me.id && wanted.has(c.ph)) { online.push({ id: c.id, ph: c.ph, name: c.name }); onlinePh.add(c.ph); }
       }
-      sendJson(ws, { t: 'presence', online });
+      // من استخدم التطبيق سابقاً وهو غير متصل الآن: نرجع "آخر ظهور"
+      const seen = [];
+      for (const ph of wanted) {
+        const s = lastSeen.get(ph);
+        if (s && !onlinePh.has(ph) && ph !== me.ph) seen.push({ id: s.id, ph, name: s.name, ts: s.ts });
+      }
+      sendJson(ws, { t: 'presence', online, seen });
       return;
     }
     if (m.t === 'to' && typeof m.to === 'string' && m.msg) {
@@ -83,7 +98,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     clearInterval(rate);
     clearTimeout(authTimer);
-    if (me && clients.get(me.id)?.ws === ws) clients.delete(me.id);
+    if (me && clients.get(me.id)?.ws === ws) { touchSeen(me); clients.delete(me.id); }
   });
   ws.on('error', () => {});
 });
